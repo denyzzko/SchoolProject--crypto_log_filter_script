@@ -1,5 +1,10 @@
 #!/bin/bash
 
+ # @file xtf
+ # @brief Bash script to filter crypto logs.
+ # @author Denis Milistenfer <xmilis00@stud.fit.vutbr.cz>
+ # @date 17.3.2024
+
 export POSIXLY_CORRECT=yes
 
 after_date=""
