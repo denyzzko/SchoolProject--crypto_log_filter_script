@@ -1,0 +1,369 @@
+#!/bin/bash
+
+export POSIXLY_CORRECT=yes
+
+after_date=""
+before_date=""
+currencies=()
+command=""
+user=""
+logs=""
+log_transactions=()
+
+
+# function to display help information
+get_help() {
+	echo "USAGE:"
+    	echo " "
+	echo "Input format: "
+	echo "	xtf [-h|--help] [FILTERS] [COMMAND] USER LOG [LOG2 [...]"
+	echo " "
+	echo "[-h, --help]"
+	echo " "
+	echo "	Shows help message and exits"
+	echo " "
+	echo " "
+	echo "[FILTERS] (combination possible) :"
+    	echo "	-a DATETIME     Only records after this DATETIME are considered (YYYY-MM-DD HH:MM:SS)"
+    	echo "	-b DATETIME     Only records before this DATETIME are considered (YYYY-MM-DD HH:MM:SS)"
+    	echo "	-c CURRENCY     Only records corresponding to the given CURRENCY are considered"
+    	echo " "
+	echo " "
+	echo "[COMMAND] (only one):"
+    	echo "	list            List of records for the given USER"
+    	echo "	list-currency   Listing of the sorted list of occurring currencies"
+    	echo "	status          Statement of the actual balance of the account grouped and sorted by individual currencies"
+    	echo "	profit          A statement of the customer's account balance with calculated fictitious income"
+    	echo " "
+	echo " "
+        echo "USER"
+        echo "	Name of user whose records are displayed"
+	echo " "
+	echo " "
+        echo "LOG [LOG2 [...]"
+        echo "	Log file containing records"
+	echo "	Multiple log files are possible as input"
+	echo "	Can also process logs compressed using the gzip tool (.gz)"
+	exit 0
+}
+
+# process different combination of filters from input
+process_filters() {
+	while getopts "a:b:c:" opt; do
+                case "$opt" in
+                        a)
+                                after_date="$OPTARG"
+                                ;;
+                        b)
+                                before_date="$OPTARG"
+                                ;;
+                        c)
+                                currencies+=("$OPTARG")
+                                ;;
+                        *)
+                                return 1
+                                ;;
+                esac
+        done
+}
+
+# process command from input
+process_command() {
+    	case "$1" in
+      		list)
+               		command="$1"
+                        ;;
+               	list-currency)
+                     	command="$1"
+       	                ;;
+             	status)
+                    	command="$1"
+                       	;;
+		profit)
+                        command="$1"
+                        ;;
+         	*)
+q			;;
+	esac
+}
+
+# function to check if DATETIME format on input  is met
+check_datetime() {
+        datetime_format='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
+        if [[ $1 =~ $datetime_format ]]; then
+                return 0
+        else
+                echo "Error: Invalid input DATETIME format: $1" >&2
+                exit 1
+
+        fi
+}
+# function to check if CURRENCY format on input is met
+check_currencies() {
+        currency_format='^[A-Z]{3}$'
+        for curncy in "${currencies[@]}"; do
+                if [[ $curncy =~ $currency_format ]]; then
+                        return 0
+                else
+                        echo "Error: Invalid input CURRENCY format: $curncy" >&2
+                        exit 1
+                fi
+        done
+}
+# function to check if transaction from log file is valid
+check_transaction() {
+	file_userFormat='^.+$'
+    	file_datetimeFormat='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
+    	file_currencyFormat='^[A-Z]{3}$'
+    	file_valueFormat='^-?[0-9]+\.[0-9]{4}$'
+	if ! [[ $1 =~ $file_userFormat ]]; then
+        	echo "Error: Invalid transaction format (USER) from log file" >&2
+        	exit 1
+    	fi
+
+    	if ! [[ $2 =~ $file_datetimeFormat ]]; then
+        	echo "Error: Invalid transaction format (DATETIME) from log file" >&2
+        	exit 1
+    	fi
+
+    	if ! [[ $3 =~ $file_currencyFormat ]]; then
+        	echo "Error: Invalid transaction format (CURRENCY) from log file" >&2
+        	exit 1
+    	fi
+
+    	if ! [[ $value =~ $file_valueFormat ]]; then
+        	echo "Error: Invalid transaction format (VALUE) from log file" >&2
+        	exit 1
+    	fi
+
+    	return 0
+}
+
+# process user and log from input
+process_userlog() { 
+	if [[ -z $command ]]; then
+		command="list"
+	fi
+	user="$1"
+	shift
+	
+	# all rest arguments are logs
+	logs=("$@")
+	if [ ${#logs[@]} -eq 0 ]; then
+		echo "Error: No input file given" >&2
+                exit 1
+
+	fi
+	# get transactions from log files to log_transactions array
+	for log_file in "${logs[@]}"; do
+		if [ ! -f "$log_file" ] || [ ! -r "$log_file" ]; then
+                                echo "Error: File does not exist or cannot be read: $log_file" >&2
+                                exit 1
+                        fi
+		# .gz is needed to ungzip first
+    		if [[ $log_file == *.gz ]]; then
+                        temp_log=$(gunzip -c "$log_file")
+                        while IFS=';' read -r usr datetime currncy value; do
+				check_transaction "$usr" "$datetime" "$currncy" "$value"
+                                log_transactions+=("$usr;$datetime;$currncy;$value")
+                        done <<< "$temp_log"
+		else
+                        while IFS=';' read -r usr datetime currncy value; do
+				check_transaction "$usr" "$datetime" "$currncy" "$value"
+                                log_transactions+=("$usr;$datetime;$currncy;$value")
+                        done < "$log_file"
+                fi
+	done	
+}
+
+# function to apply different combination of filters on data
+filter_data(){
+	log_transactionsFiltered=()
+	
+	for transaction in "${log_transactions[@]}"; do
+        	IFS=';' read -r usr datetime currncy value <<< "$transaction"
+                
+		# filter by currencies
+		currency_match=0
+        	if [[ -n ${currencies[@]} ]]; then
+            		# check if currency in current transaction is in the currency array
+            		for c in "${currencies[@]}"; do
+                		if [[ $currncy == $c ]]; then
+                    			currency_match=1
+                    			break
+                		fi
+            		done
+            		# if there was no match, continue to the next transaction
+            		if [[ $currency_match -eq 0 ]]; then
+                		continue
+            		fi
+        	fi
+		
+		# filter by after/before date
+		if [[ -n $after_date && ($datetime < $after_date || $datetime == $after_date) ]] || 
+  	   	   [[ -n $before_date && ($datetime > $before_date || $datetime == $before_date ) ]]; then
+    			continue
+		fi
+
+
+		log_transactionsFiltered+=("$transaction")
+	done	
+	
+	log_transactions=("${log_transactionsFiltered[@]}")
+}
+
+# function for command list
+func_list() {
+    	log_list=()
+    	
+	for transaction in "${log_transactions[@]}"; do
+		IFS=';' read -r usr datetime currncy value <<< "$transaction"
+		# if user is matched appends transaction to log_list array
+        	if [[ "$usr" == "$user" ]]; then
+            		log_list+=("$transaction")
+        	fi
+    	done
+
+	log_transactions=("${log_list[@]}")
+}
+
+# function for command list-currency
+func_listCurrency() {
+	log_currencies=()
+	
+	for transaction in "${log_transactions[@]}"; do
+        	IFS=';' read -r usr datetime currncy value <<< "$transaction"
+        	# get currencies from matched user
+		if [[ "$usr" == "$user" ]]; then
+            		log_currencies+=("$currncy")
+        	fi
+    	done
+	
+	# sort currencies and get rid of duplicates 
+	IFS=$'\n' log_currencies=($(printf '%s\n' "${log_currencies[@]}" | sort -u))
+	unset IFS
+
+	log_transactions=("${log_currencies[@]}")
+} 
+
+# function for command status
+func_status() {
+	log_status=()
+	
+	# uses function list and listCurrency to get currencies and transactions of matched user
+	func_list
+	help_log=("${log_transactions[@]}")
+	func_listCurrency
+
+	# to change decimal separatot from comma to dot for rounding
+	old_locale=$LC_NUMERIC
+        LC_NUMERIC=C
+	
+	# for every currency goes through all transactions to get total value and rounds it
+	for curncy in "${log_transactions[@]}"; do
+        	total=0
+        	for transaction in "${help_log[@]}"; do
+            		IFS=';' read -r usr datetime currncy value <<< "$transaction"
+            		if [[ "$currncy" == "$curncy" ]]; then
+                		total=$(echo "$total + $value" | bc)
+            		fi
+        	done
+		
+		rounded_total=$(printf "%.4f" $total)
+        	log_status+=("$curncy : $rounded_total")
+    	done
+	
+	LC_NUMERIC=$old_locale
+
+	log_transactions=("${log_status[@]}")	
+}
+
+# function for command profit
+func_profit() {
+	log_profit=()
+	
+	# uses function status and adds XTF_PROFIT
+	func_status
+
+	# to change decimal separatot from comma to dot for rounding
+        old_locale=$LC_NUMERIC
+        LC_NUMERIC=C
+
+	if [[ -z "$XTF_PROFIT" ]]; then
+		XTF_PROFIT=20
+	fi
+	
+	# for every positive status value adds XTF_PROFIT and rounds it
+	for stat in "${log_transactions[@]}"; do
+                IFS=': ' read -r currncy value <<< "$stat"
+		is_positive=$(awk -v val="$value" 'BEGIN {print (val > 0) ? 1 : 0}')
+    		if [[ $is_positive -eq 1 ]]; then
+        		increase=$(echo "$value * $XTF_PROFIT / 100" | bc -l)
+        		new_value=$(echo "$value + $increase" | bc -l)
+        		new_value=$(printf "%.4f" "$new_value")
+        		log_profit+=("$currncy : $new_value")
+    		else
+        		log_profit+=("$currncy : $value")
+    		fi
+        done
+
+	LC_NUMERIC=$old_locale
+
+	log_transactions=("${log_profit[@]}")
+}
+
+# help
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    get_help
+fi
+
+#process filters
+process_filters "$@"
+if [[ $? -ne 0 ]]; then
+    echo "Error: Invalid FILTER used" >&2
+    exit 1
+fi
+shift $((OPTIND - 1))
+
+# process command user and log files
+case "$1" in
+    list|list-currency|status|profit)
+        process_command "$@"
+	[[ -n $command ]] && shift
+	process_userlog "$@"
+        ;;
+    *)
+	process_userlog "$@"
+        ;;
+esac
+
+# 1. call filter function if any filters were set to filter transactions
+if { [[ -n $after_date ]] && check_datetime "$after_date"; } ||
+   { [[ -n $before_date ]] && check_datetime "$before_date"; } ||
+   { [[ -n ${currencies[@]} ]] && check_currencies; }; then
+
+	filter_data
+fi
+
+# 2. calling command function  to apply command on filtered transactions
+case "$command" in
+    	list)
+        	func_list
+        	;;
+	list-currency)
+        	func_listCurrency
+        	;;
+	status)
+        	func_status
+	        ;;
+	profit)
+        	func_profit
+	        ;;
+esac
+
+# 3. print final processed data on standard output
+for data in "${log_transactions[@]}"; do
+        echo "$data"
+done
+
+exit 0 
